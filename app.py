@@ -179,6 +179,33 @@ def create():
 
 # ---GET----------------------------------------------------------------
 
+@app.route(BASE_URL + '/getWeek', methods=['GET'])
+def get_week():
+    try:
+        today = datetime.now(mexico_tz).date()
+        week_start = today - timedelta(days=today.weekday())
+        week_end = week_start + timedelta(days=6)
+        
+        result = supabase.table('total_day')\
+            .select('*')\
+            .gte('date', str(week_start))\
+            .lte('date', str(week_end))\
+            .execute()
+        
+        week_totals = {}
+        total_week = 0
+        
+        for day in result.data:
+            date_obj = datetime.strptime(day['date'], '%Y-%m-%d').date()
+            date_formatted = date_obj.strftime('%A, %Y-%m-%d')
+            week_totals[date_formatted] = (day['total'] ** 2 / 216 * 1000)
+            total_week += day['total']
+        
+        return jsonify({'week_totals': week_totals, 'total_week': total_week})
+    except Exception as e:
+        logger.error(f"Error in getWeek: {e}")
+        return jsonify({'error': str(e)}), 500
+    
 @app.route(BASE_URL + '/readTempLatest/<number>', methods=['GET'])
 def readTempLatest(number):
     try:
@@ -242,7 +269,15 @@ def get_all_hours():
         hourly_totals = {hour: 0 for hour in range(24)}
 
         for data in result.data:
-            hour = datetime.strptime(data['date'], '%Y-%m-%d %H:%M:%S').hour
+            # Manejar ambos formatos de fecha
+            date_str = data['date']
+            if 'T' in date_str:
+                # Formato ISO 8601 de Supabase
+                hour = datetime.fromisoformat(date_str.replace('Z', '+00:00')).hour
+            else:
+                # Formato tradicional
+                hour = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S').hour
+            
             total = sum([
                 data['propeller1'] ** 2 / 216 * 1000,
                 data['propeller2'] ** 2 / 216 * 1000,
