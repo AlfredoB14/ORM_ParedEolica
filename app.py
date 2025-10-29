@@ -179,6 +179,90 @@ def create():
 
 # ---GET----------------------------------------------------------------
 
+@app.route(BASE_URL + '/read30days', methods=['GET'])
+def read30days():
+    try:
+        # Hacer un diccionario del 1 al 30 que tenga el total de cada día
+        today = datetime.now(mexico_tz).date()
+        thirty_days_ago = today - timedelta(days=30)
+        
+        result = supabase.table('total_day')\
+            .select('*')\
+            .gte('date', str(thirty_days_ago))\
+            .lte('date', str(today))\
+            .execute()
+        
+        # Crear un diccionario con los últimos 30 días, inicializando en 0
+        day_totals = { (thirty_days_ago + timedelta(days=i)).strftime('%d'): 0 for i in range(31) }
+        
+        # Actualizar el diccionario con los valores reales
+        for day in result.data:
+            date_obj = datetime.strptime(day['date'], '%Y-%m-%d').date()
+            day_totals[date_obj.strftime('%d')] = day['total']
+        
+        return jsonify(day_totals)
+    except Exception as e:
+        logger.error(f"Error in read30days: {e}")
+        return jsonify({'error': str(e)}), 500
+    
+@app.route(BASE_URL + '/getAllMinutes', methods=['GET'])
+def get_all_minutes():
+    try:
+        date_str = request.args.get('date')
+        if not date_str:
+            return jsonify({'error': 'Date parameter is required'}), 400
+        
+        try:
+            date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD HH:MM:SS'}), 400
+        
+        hour_start = date.replace(minute=0, second=0, microsecond=0)
+        hour_end = hour_start + timedelta(hours=1)
+        
+        result = supabase.table('wall_data')\
+            .select('*')\
+            .gte('date', hour_start.strftime('%Y-%m-%d %H:%M:%S'))\
+            .lt('date', hour_end.strftime('%Y-%m-%d %H:%M:%S'))\
+            .execute()
+        
+        minute_totals = {minute: {
+            'propeller1': 0,
+            'propeller2': 0,
+            'propeller3': 0,
+            'propeller4': 0,
+            'propeller5': 0,
+            'total': 0
+        } for minute in range(60)}
+        
+        for data in result.data:
+            # Manejar ambos formatos de fecha
+            date_str_data = data['date']
+            if 'T' in date_str_data:
+                # Formato ISO 8601 de Supabase
+                minute = datetime.fromisoformat(date_str_data.replace('Z', '+00:00')).minute
+            else:
+                # Formato tradicional
+                minute = datetime.strptime(date_str_data, '%Y-%m-%d %H:%M:%S').minute
+            
+            minute_totals[minute]['propeller1'] += data['propeller1'] ** 2 / 216 * 1000
+            minute_totals[minute]['propeller2'] += data['propeller2'] ** 2 / 216 * 1000
+            minute_totals[minute]['propeller3'] += data['propeller3'] ** 2 / 216 * 1000
+            minute_totals[minute]['propeller4'] += data['propeller4'] ** 2 / 216 * 1000
+            minute_totals[minute]['propeller5'] += data['propeller5'] ** 2 / 216 * 1000
+            minute_totals[minute]['total'] += (
+                (data['propeller1'] ** 2 / 216 * 1000) + 
+                (data['propeller2'] ** 2 / 216 * 1000) + 
+                (data['propeller3'] ** 2 / 216 * 1000) + 
+                (data['propeller4'] ** 2 / 216 * 1000) + 
+                (data['propeller5'] ** 2 / 216 * 1000)
+            )
+        
+        return jsonify(minute_totals)
+    except Exception as e:
+        logger.error(f"Error in getAllMinutes: {e}")
+        return jsonify({'error': str(e)}), 500
+    
 @app.route(BASE_URL + '/getWeek', methods=['GET'])
 def get_week():
     try:
