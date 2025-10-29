@@ -20,18 +20,24 @@ CORS(app)
 # Load environment variables from .env (ensure this is done before reading them)
 load_dotenv()
 
-db_uri = app.config['SQLALCHEMY_DATABASE_URI'] 
-# Read the database URI and fail early with a clear message if it's missing
-app.config['SQLALCHEMY_DATABASE_URI'] = db_uri + "?sslmode=require"
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    "poolclass": NullPool
-}
+app = Flask(__name__)
+
+# 🧩 1. Obtiene la URI desde el entorno (.env o configuraciones de Vercel)
+db_uri = os.getenv("SQLALCHEMY_DATABASE_URI")
 
 if not db_uri:
-    raise RuntimeError("Environment variable SQLALCHEMY_DATABASE_URI is not set. Ensure you have a .env file with SQLALCHEMY_DATABASE_URI and that it's reachable from this process.")
-app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
- 
+    raise ValueError("❌ SQLALCHEMY_DATABASE_URI no está definida en las variables de entorno")
+
+# 🧩 2. Configura SQLAlchemy
+app.config["SQLALCHEMY_DATABASE_URI"] = db_uri + "?sslmode=require"
+
+# Si estamos en Vercel, usar NullPool para evitar errores de conexión
+if os.getenv("VERCEL") == "1":
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"poolclass": NullPool}
+
+# 🧩 3. Inicializa la base
 db = SQLAlchemy(app)
+
 migrate = Migrate(app, db)  # Inicializar Flask-Migrate
 
 BASE_URL = '/api/v1'
