@@ -13,14 +13,20 @@ from flask_migrate import Migrate
 from datetime import date, timedelta
 import pytz
 from sqlalchemy import cast, Date, func
+from sqlalchemy.pool import NullPool
 
 app = Flask(__name__)
 CORS(app)
 # Load environment variables from .env (ensure this is done before reading them)
 load_dotenv()
 
+db_uri = app.config['SQLALCHEMY_DATABASE_URI'] 
 # Read the database URI and fail early with a clear message if it's missing
-db_uri = os.getenv('SQLALCHEMY_DATABASE_URI')
+app.config['SQLALCHEMY_DATABASE_URI'] = db_uri + "?sslmode=require"
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    "poolclass": NullPool
+}
+
 if not db_uri:
     raise RuntimeError("Environment variable SQLALCHEMY_DATABASE_URI is not set. Ensure you have a .env file with SQLALCHEMY_DATABASE_URI and that it's reachable from this process.")
 app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
