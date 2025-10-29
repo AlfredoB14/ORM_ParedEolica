@@ -1,75 +1,120 @@
 #   Alfredo Barranco Ahued
 #   5 de octubre de 2024
 #   ORM para la base de datos de la Pared Eólica para ASE II
-#   Versión 2.0
+#   Versión 2.1 - Usando create_engine
 
 from flask import Flask, request, abort, jsonify
-from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 import os
 from flask_cors import CORS
-from flask_migrate import Migrate
-from datetime import date, timedelta
 import pytz
-from sqlalchemy import cast, Date, func
+from sqlalchemy import create_engine, Column, Integer, Float, DateTime, Date, cast, func
+from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
 from sqlalchemy.pool import NullPool
+from contextlib import contextmanager
+import logging
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
-# Load environment variables from .env (ensure this is done before reading them)
+
+# Load environment variables
 load_dotenv()
 
-app = Flask(__name__)
-
-# 🧩 1. Obtiene la URI desde el entorno (.env o configuraciones de Vercel)
-db_uri = os.getenv("SQLALCHEMY_DATABASE_URI")
-
-if not db_uri:
-    raise ValueError("❌ SQLALCHEMY_DATABASE_URI no está definida en las variables de entorno")
-
-# 🧩 2. Configura SQLAlchemy
-app.config["SQLALCHEMY_DATABASE_URI"] = db_uri + "?sslmode=require"
-
-# Si estamos en Vercel, usar NullPool para evitar errores de conexión
-if os.getenv("VERCEL") == "1":
-    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"poolclass": NullPool}
-
-# 🧩 3. Inicializa la base
-db = SQLAlchemy(app)
-
-migrate = Migrate(app, db)  # Inicializar Flask-Migrate
-
 BASE_URL = '/api/v1'
- 
 mexico_tz = pytz.timezone('America/Mexico_City')
+
+# -----------------------------------------------------------------------
+# CONFIGURACIÓN DE BASE DE DATOS CON create_engine
+# -----------------------------------------------------------------------
+
+# Obtener credenciales
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST", "db.tmjwqdfibdjlszfklyxz.supabase.co")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "postgres")
+
+if not DB_PASSWORD:
+    raise ValueError("❌ DB_PASSWORD no está definida en las variables de entorno")
+
+# Construir la URI de conexión
+DATABASE_URI = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+# Configurar el engine según el entorno
+if os.getenv("VERCEL") == "1":
+    # Para Vercel (serverless) - sin pool de conexiones
+    engine = create_engine(
+        DATABASE_URI,
+        poolclass=NullPool,
+        connect_args={
+            "sslmode": "require",
+            "connect_timeout": 10,
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        },
+        echo=False
+    )
+    logger.info("✓ Engine configurado para Vercel (NullPool)")
+else:
+    # Para desarrollo local - con pool de conexiones
+    engine = create_engine(
+        DATABASE_URI,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        pool_size=5,
+        max_overflow=10,
+        connect_args={
+            "sslmode": "require",
+            "connect_timeout": 10,
+        },
+        echo=False
+    )
+    logger.info("✓ Engine configurado para desarrollo local")
+
+# Crear session factory
+Session = scoped_session(sessionmaker(bind=engine))
+Base = declarative_base()
+
+# Context manager para manejar sesiones de manera segura
+@contextmanager
+def get_session():
+    session = Session()
+    try:
+        yield session
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Error en sesión de base de datos: {e}")
+        raise
+    finally:
+        session.close()
 
 # -----------------------------------------------------------------------
 # MODELOS
 # -----------------------------------------------------------------------
 
-class TempWallData(db.Model):
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    date = db.Column(db.DateTime, nullable=False)
-    group = db.Column(db.Integer, nullable=False)
-    propeller1 = db.Column(db.Float, nullable=False)
-    propeller2 = db.Column(db.Float, nullable=False)
-    propeller3 = db.Column(db.Float, nullable=False)
-    propeller4 = db.Column(db.Float, nullable=False)
-    propeller5 = db.Column(db.Float, nullable=False)
-
-    def __init__(self, date, group, propeller1, propeller2, propeller3, propeller4, propeller5):    
-        self.date = date
-        self.group = group
-        self.propeller1 = propeller1
-        self.propeller2 = propeller2
-        self.propeller3 = propeller3
-        self.propeller4 = propeller4
-        self.propeller5 = propeller5
+class TempWallData(Base):
+    __tablename__ = 'temp_wall_data'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(DateTime, nullable=False)
+    group = Column(Integer, nullable=False)
+    propeller1 = Column(Float, nullable=False)
+    propeller2 = Column(Float, nullable=False)
+    propeller3 = Column(Float, nullable=False)
+    propeller4 = Column(Float, nullable=False)
+    propeller5 = Column(Float, nullable=False)
 
     def to_json(self):
         return {
-            'id': self.id,  # Siempre es buena idea incluir el id también
+            'id': self.id,
             'date': self.date.strftime('%Y-%m-%d %H:%M:%S'),
             'group': self.group,
             'propeller1': self.propeller1,
@@ -79,32 +124,21 @@ class TempWallData(db.Model):
             'propeller5': self.propeller5,
         }
 
-    def __repr__(self):
-        return '<TempWallData %r>' % self.propeller1
-
-
-class WallData(db.Model):
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    date = db.Column(db.DateTime, nullable=False)
-    group = db.Column(db.Integer, nullable=False)
-    propeller1 = db.Column(db.Float, nullable=False)
-    propeller2 = db.Column(db.Float, nullable=False)
-    propeller3 = db.Column(db.Float, nullable=False)
-    propeller4 = db.Column(db.Float, nullable=False)
-    propeller5 = db.Column(db.Float, nullable=False)
-
-    def __init__(self, date, group, propeller1, propeller2, propeller3, propeller4, propeller5):    
-        self.date = date
-        self.group = group
-        self.propeller1 = propeller1
-        self.propeller2 = propeller2
-        self.propeller3 = propeller3
-        self.propeller4 = propeller4
-        self.propeller5 = propeller5
+class WallData(Base):
+    __tablename__ = 'wall_data'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(DateTime, nullable=False)
+    group = Column(Integer, nullable=False)
+    propeller1 = Column(Float, nullable=False)
+    propeller2 = Column(Float, nullable=False)
+    propeller3 = Column(Float, nullable=False)
+    propeller4 = Column(Float, nullable=False)
+    propeller5 = Column(Float, nullable=False)
 
     def to_json(self):
         return {
-            'id': self.id,  # Siempre es buena idea incluir el id también
+            'id': self.id,
             'date': self.date.strftime('%Y-%m-%d %H:%M:%S'),
             'group': self.group,
             'propeller1': self.propeller1,
@@ -114,24 +148,15 @@ class WallData(db.Model):
             'propeller5': self.propeller5,
         }
 
-    def __repr__(self):
-        return '<WallData %r>' % self.propeller1
-
-# -----------------------------------------------------------------------
-class TotalDay(db.Model):
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    date = db.Column(db.Date, nullable=False)
-    total = db.Column(db.Float, nullable=False)
-    group1 = db.Column(db.Float, nullable=False)
-    group2 = db.Column(db.Float, nullable=False)
-    group3 = db.Column(db.Float, nullable=False)
-
-    def __init__(self, date, total, group1, group2, group3):
-        self.date = date
-        self.total = total
-        self.group1 = group1
-        self.group2 = group2
-        self.group3 = group3
+class TotalDay(Base):
+    __tablename__ = 'total_day'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date, nullable=False)
+    total = Column(Float, nullable=False)
+    group1 = Column(Float, nullable=False)
+    group2 = Column(Float, nullable=False)
+    group3 = Column(Float, nullable=False)
 
     def to_json(self):
         return {
@@ -143,18 +168,12 @@ class TotalDay(db.Model):
             'group3': self.group3
         }
 
-    def __repr__(self):
-        return '<TotalDay %r>' % self.total
-
-# -----------------------------------------------------------------------
-class TotalMonth(db.Model):
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    date = db.Column(db.Date, nullable=False)
-    total = db.Column(db.Float, nullable=False)
-
-    def __init__(self, date, total):
-        self.date = date
-        self.total = total
+class TotalMonth(Base):
+    __tablename__ = 'total_month'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date, nullable=False)
+    total = Column(Float, nullable=False)
 
     def to_json(self):
         return {
@@ -163,15 +182,11 @@ class TotalMonth(db.Model):
             'total': self.total
         }
 
-    def __repr__(self):
-        return '<TotalMonth %r>' % self.total
-# -----------------------------------------------------------------------
-class TotalAll(db.Model):
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    total = db.Column(db.Float, nullable=False)
-
-    def __init__(self, total):
-        self.total = total
+class TotalAll(Base):
+    __tablename__ = 'total_all'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    total = Column(Float, nullable=False)
 
     def to_json(self):
         return {
@@ -179,423 +194,494 @@ class TotalAll(db.Model):
             'total': self.total
         }
 
-    def __repr__(self):
-        return '<TotalAll %r>' % self.total
-
 # -----------------------------------------------------------------------
-# INICIO DE | FUNCIONES
+# FUNCIONES DE ACTUALIZACIÓN
 # -----------------------------------------------------------------------
 
-def update_total_day(today, total_sum, sum_group1, sum_group2, sum_group3):
+def update_total_day(session, today, total_sum, sum_group1, sum_group2, sum_group3):
+    today_object = session.query(TotalDay).filter_by(date=today).first()
 
-    today_object = TotalDay.query.filter_by(date=today).first()
-
-    # Si no existe un objeto con la fecha de hoy, crear uno nuevo
     if today_object is None:
-        new_total_day = TotalDay(date=today, total=total_sum, group1=sum_group1, group2=sum_group2, group3=sum_group3)
-        db.session.add(new_total_day)
-        db.session.commit()
-    
-    # Si ya existe un objeto con la fecha de hoy, actualizarlo
+        new_total_day = TotalDay(
+            date=today,
+            total=total_sum,
+            group1=sum_group1,
+            group2=sum_group2,
+            group3=sum_group3
+        )
+        session.add(new_total_day)
     else:
         today_object.total += total_sum
         today_object.group1 += sum_group1
         today_object.group2 += sum_group2
         today_object.group3 += sum_group3
-        db.session.commit()
-# -----------------------------------------------------------------------
-def update_total_month(month, total_sum):
-    # Ensure month is a datetime object and convert to Mexico City timezone
+
+def update_total_month(session, month, total_sum):
     if isinstance(month, str):
         month = datetime.strptime(month, '%Y-%m')
-    month = mexico_tz.localize(month)
-
-    # Use the first day of the month for the query
+    
     month_start = month.replace(day=1).date()
+    month_object = session.query(TotalMonth).filter_by(date=month_start).first()
 
-    month_object = TotalMonth.query.filter_by(date=month_start).first()
-
-
-    print(month_start)
-
-    print(month_object)
-    # If no object exists with the given date, create a new one
     if month_object is None:
         new_total_month = TotalMonth(date=month_start, total=total_sum)
-        db.session.add(new_total_month)
-        db.session.commit()
-    
-    # If an object already exists with the given date, update it
+        session.add(new_total_month)
     else:
         month_object.total += total_sum
-        db.session.commit()
 
-# -----------------------------------------------------------------------
-def update_total_all(total_sum):
+def update_total_all(session, total_sum):
+    total_object = session.query(TotalAll).first()
 
-    total_object = TotalAll.query.first()
-
-    # Si no existe un objeto crear uno nuevo
-    # Esto solo debería pasar la primera vez que se corre el programa
     if total_object is None:
         new_total_all = TotalAll(total=total_sum)
-        db.session.add(new_total_all)
-        db.session.commit()
-    
-    # Si ya existe un objeto con la fecha de hoy, actualizarlo
+        session.add(new_total_all)
     else:
         total_object.total += total_sum
-        db.session.commit()
 
 # -----------------------------------------------------------------------
-# FIN DE | FUNCIONES
+# RUTAS
 # -----------------------------------------------------------------------
 
-# --- MAIN -------------------------------------------------------------
 @app.route('/')
 def index():
     return "Welcome to my ORM app!"
- 
+
 # ---POST---------------------------------------------------------------
 
 @app.route(BASE_URL + '/new', methods=['POST'])
 def create():
+    try:
+        date = datetime.now(mexico_tz)
+        date_time = date.strftime('%Y-%m-%d %H:%M:%S')
+        today = date.date()
+        month = date.strftime('%Y-%m')
 
-    # Definir la fecha de hoy
-    date = datetime.now(mexico_tz) # Fecha que irá en WallData
+        data = request.get_json()
 
-    date_time = date.strftime('%Y-%m-%d %H:%M:%S') # Fecha que irá en WallData
-    today = date.strftime('%Y-%m-%d') # Fecha que irá en TotalDay
-    month = date.strftime('%Y-%m') # Fecha que irá en TotalMonth
+        if not request.json or 'propeller1' not in request.json:
+            abort(400)
 
-    print(date)
-    # Obtener los datos del request
-    data = request.get_json()
+        total_sum = sum([
+            data['propeller1'],
+            data['propeller2'],
+            data['propeller3'],
+            data['propeller4'],
+            data['propeller5']
+        ])
 
-    if not request.json or 'propeller1' not in request.json:
-        abort(400)
+        if total_sum < 0.2:
+            return jsonify({'message': 'Data not saved. Total sum is less than 0.2'})
 
-    else:
+        with get_session() as session:
+            new_wall_data = WallData(
+                date=date_time,
+                group=data['group'],
+                propeller1=data['propeller1'],
+                propeller2=data['propeller2'],
+                propeller3=data['propeller3'],
+                propeller4=data['propeller4'],
+                propeller5=data['propeller5']
+            )
+            
+            new_temp_wall_data = TempWallData(
+                date=date_time,
+                group=data['group'],
+                propeller1=data['propeller1'],
+                propeller2=data['propeller2'],
+                propeller3=data['propeller3'],
+                propeller4=data['propeller4'],
+                propeller5=data['propeller5']
+            )
 
-        # Sacar el total generado para actualizar los demás
-        total_sum = data['propeller1'] + data['propeller2'] + data['propeller3'] + data['propeller4'] + data['propeller5']
+            session.add(new_wall_data)
+            session.add(new_temp_wall_data)
 
-        # Crear un nuevo objeto WallData
-        new_wall_data = WallData(
-            date=date_time,
-            group=data['group'],
-            propeller1=data['propeller1'],
-            propeller2=data['propeller2'],
-            propeller3=data['propeller3'],
-            propeller4=data['propeller4'],
-            propeller5=data['propeller5']
-        )
-        new_TempWall_data = TempWallData(
-            date=date_time,
-            group=data['group'],
-            propeller1=data['propeller1'],
-            propeller2=data['propeller2'],
-            propeller3=data['propeller3'],
-            propeller4=data['propeller4'],
-            propeller5=data['propeller5']
-        )
-
-        if total_sum >= 0.2:
-            # Guardar el objeto en la base de datos
-            db.session.add(new_wall_data)
-            db.session.add(new_TempWall_data)
-
-            # Actualizar el total del día
-            sum_group1 = data['propeller1'] + data['propeller2'] 
+            sum_group1 = data['propeller1'] + data['propeller2']
             sum_group2 = data['propeller3']
             sum_group3 = data['propeller4'] + data['propeller5']
 
-            update_total_day(today, total_sum, sum_group1, sum_group2, sum_group3)
-
-            # Actualizar el total del mes
-            update_total_month(month, total_sum)
-
-            # Actualizar el total general
-            update_total_all(total_sum)
+            update_total_day(session, today, total_sum, sum_group1, sum_group2, sum_group3)
+            update_total_month(session, month, total_sum)
+            update_total_all(session, total_sum)
 
             return jsonify(new_wall_data.to_json())
-        else:
-            return jsonify({'message': 'Data not saved. Total sum is less than 0.2'})
+
+    except Exception as e:
+        logger.error(f"Error in create: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # ---GET----------------------------------------------------------------
 
-# GETs | WallData
-
 @app.route(BASE_URL + '/readTempLatest/<number>', methods=['GET'])
 def readTempLatest(number):
-    latest_data = TempWallData.query.filter_by(group=number).order_by(TempWallData.id.desc()).first()
-    return jsonify(latest_data.to_json())
-
-# -----------------------------------------------------------------------
+    try:
+        with get_session() as session:
+            latest_data = session.query(TempWallData).filter_by(group=number).order_by(TempWallData.id.desc()).first()
+            
+            if latest_data is None:
+                return jsonify({'message': 'No data found'}), 404
+                
+            return jsonify(latest_data.to_json())
+    except Exception as e:
+        logger.error(f"Error in readTempLatest: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route(BASE_URL + '/readLatest', methods=['GET'])
 def readLatest():
-    latest_data = WallData.query.order_by(WallData.id.desc()).first()
-    return jsonify(latest_data.to_json())
-# -----------------------------------------------------------------------
+    try:
+        with get_session() as session:
+            latest_data = session.query(WallData).order_by(WallData.id.desc()).first()
+            
+            if latest_data is None:
+                return jsonify({'message': 'No data found'}), 404
+                
+            return jsonify(latest_data.to_json())
+    except Exception as e:
+        logger.error(f"Error in readLatest: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route(BASE_URL + '/readAll', methods=['GET'])
 def readAll():
-    all_data = WallData.query.all()
-    return jsonify([data.to_json() for data in all_data])
-# -----------------------------------------------------------------------
+    try:
+        with get_session() as session:
+            all_data = session.query(WallData).all()
+            return jsonify([data.to_json() for data in all_data])
+    except Exception as e:
+        logger.error(f"Error in readAll: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route(BASE_URL + '/getAllHours', methods=['GET'])
 def get_all_hours():
-    date_str = request.args.get('date')
-    if not date_str:
-        date = datetime.now(mexico_tz).date()
-    else:
-        try:
-            date = datetime.strptime(date_str, '%Y-%m-%d').date()
-        except ValueError:
-            return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+    try:
+        date_str = request.args.get('date')
+        if not date_str:
+            date_obj = datetime.now(mexico_tz).date()
+        else:
+            try:
+                date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+            except ValueError:
+                return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
 
-    all_data = WallData.query.filter(cast(WallData.date, Date) == date).all()
+        with get_session() as session:
+            all_data = session.query(WallData).filter(cast(WallData.date, Date) == date_obj).all()
 
-    hourly_totals = {hour: 0 for hour in range(24)}
+            hourly_totals = {hour: 0 for hour in range(24)}
 
-    for data in all_data:
-        hour = data.date.hour
-        total = ((data.propeller1 ** 2/216 * 1000) + (data.propeller2 ** 2/216 * 1000) + (data.propeller3 ** 2/216 * 1000) + (data.propeller4 ** 2/216 * 1000) + (data.propeller5 ** 2/216 * 1000))
-        hourly_totals[hour] += total
+            for data in all_data:
+                hour = data.date.hour
+                total = sum([
+                    data.propeller1 ** 2 / 216 * 1000,
+                    data.propeller2 ** 2 / 216 * 1000,
+                    data.propeller3 ** 2 / 216 * 1000,
+                    data.propeller4 ** 2 / 216 * 1000,
+                    data.propeller5 ** 2 / 216 * 1000
+                ])
+                hourly_totals[hour] += total
 
-    return jsonify(hourly_totals)
+            return jsonify(hourly_totals)
+    except Exception as e:
+        logger.error(f"Error in getAllHours: {e}")
+        return jsonify({'error': str(e)}), 500
 
-# -----------------------------------------------------------------------
 @app.route(BASE_URL + '/getAllMinutes', methods=['GET'])
 def get_all_minutes():
-    date_str = request.args.get('date')
-    if not date_str:
-        return jsonify({'error': 'Date parameter is required'}), 400
-
     try:
-        date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-    except ValueError:
-        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD HH:MM:SS'}), 400
+        date_str = request.args.get('date')
+        if not date_str:
+            return jsonify({'error': 'Date parameter is required'}), 400
 
+        try:
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD HH:MM:SS'}), 400
 
-    all_data = WallData.query.filter(
-        WallData.date >= date.replace(minute=0, second=0, microsecond=0),
-        WallData.date < date.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    ).all()
-    
-    print(all_data)
-    minute_totals = {minute: {
-        'propeller1': 0,
-        'propeller2': 0,
-        'propeller3': 0,
-        'propeller4': 0,
-        'propeller5': 0,
-        'total': 0
-    } for minute in range(60)}
+        with get_session() as session:
+            all_data = session.query(WallData).filter(
+                WallData.date >= date_obj.replace(minute=0, second=0, microsecond=0),
+                WallData.date < date_obj.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            ).all()
 
-    print(all_data)
-    for data in all_data:
-        minute = data.date.minute
-        minute_totals[minute]['propeller1'] += data.propeller1 ** 2/216 * 1000
-        minute_totals[minute]['propeller2'] += data.propeller2 ** 2/216 * 1000
-        minute_totals[minute]['propeller3'] += data.propeller3 ** 2/216 * 1000
-        minute_totals[minute]['propeller4'] += data.propeller4 ** 2/216 * 1000
-        minute_totals[minute]['propeller5'] += data.propeller5 ** 2/216 * 1000
-        minute_totals[minute]['total'] += ((data.propeller1 ** 2/216 * 1000) + (data.propeller2 ** 2/216 * 1000) + (data.propeller3 ** 2/216 * 1000) + (data.propeller4 ** 2/216 * 1000) + (data.propeller5 ** 2/216 * 1000))
+            minute_totals = {minute: {
+                'propeller1': 0,
+                'propeller2': 0,
+                'propeller3': 0,
+                'propeller4': 0,
+                'propeller5': 0,
+                'total': 0
+            } for minute in range(60)}
 
-    return jsonify(minute_totals)
-# -----------------------------------------------------------------------
+            for data in all_data:
+                minute = data.date.minute
+                minute_totals[minute]['propeller1'] += data.propeller1 ** 2 / 216 * 1000
+                minute_totals[minute]['propeller2'] += data.propeller2 ** 2 / 216 * 1000
+                minute_totals[minute]['propeller3'] += data.propeller3 ** 2 / 216 * 1000
+                minute_totals[minute]['propeller4'] += data.propeller4 ** 2 / 216 * 1000
+                minute_totals[minute]['propeller5'] += data.propeller5 ** 2 / 216 * 1000
+                minute_totals[minute]['total'] += sum([
+                    data.propeller1 ** 2 / 216 * 1000,
+                    data.propeller2 ** 2 / 216 * 1000,
+                    data.propeller3 ** 2 / 216 * 1000,
+                    data.propeller4 ** 2 / 216 * 1000,
+                    data.propeller5 ** 2 / 216 * 1000
+                ])
+
+            return jsonify(minute_totals)
+    except Exception as e:
+        logger.error(f"Error in getAllMinutes: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route(BASE_URL + '/getHourByNumber/<number>', methods=['GET'])
 def get_hour_by_number(number):
+    try:
+        today = datetime.now(mexico_tz).date()
+        
+        with get_session() as session:
+            all_data = session.query(WallData).filter(cast(WallData.date, Date) == today).all()
 
-    today = datetime.now(mexico_tz).date()
-    all_data = WallData.query.filter(cast(WallData.date, Date) == today).all()
+            total = 0
+            for data in all_data:
+                if data.date.hour == int(number):
+                    total += sum([data.propeller1, data.propeller2, data.propeller3, data.propeller4, data.propeller5])
 
-    total = 0
+            return jsonify({'hour': number, 'total': total})
+    except Exception as e:
+        logger.error(f"Error in getHourByNumber: {e}")
+        return jsonify({'error': str(e)}), 500
 
-    for data in all_data:
-        if data.date.hour == int(number):
-            total += data.propeller1 + data.propeller2 + data.propeller3 + data.propeller4 + data.propeller5
-
-    return jsonify({'hour': number, 'total': total})
-
-# -----------------------------------------------------------------------
 @app.route(BASE_URL + '/get_totals', methods=['GET'])
 def get_totals():
-    # Realiza una consulta para sumar los propellers por grupo
-    results = (
-        db.session.query(
-            WallData.group,
-            func.sum(
-                WallData.propeller1 +
-                WallData.propeller2 +
-                WallData.propeller3 +
-                WallData.propeller4 +
-                WallData.propeller5
-            ).label('total')
-        )
-        .group_by(WallData.group)
-        .all()
-    )
-    
-    # Convierte los resultados a un diccionario
-    totals = {f'group{row[0]}': row[1] for row in results}
-    
-    return jsonify(totals)
-#- Fin de GET para WallData-----------------------------------------------
+    try:
+        with get_session() as session:
+            results = session.query(
+                WallData.group,
+                func.sum(
+                    WallData.propeller1 +
+                    WallData.propeller2 +
+                    WallData.propeller3 +
+                    WallData.propeller4 +
+                    WallData.propeller5
+                ).label('total')
+            ).group_by(WallData.group).all()
+
+            totals = {f'group{row[0]}': row[1] for row in results}
+            return jsonify(totals)
+    except Exception as e:
+        logger.error(f"Error in get_totals: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # GETs | TotalDay -------------------------------------------------------
 
 @app.route(BASE_URL + '/readAllDays', methods=['GET'])
 def readAllDays():
-    all_data = TotalDay.query.all()
-    return jsonify([data.to_json() for data in all_data])
-
-# -----------------------------------------------------------------------
+    try:
+        with get_session() as session:
+            all_data = session.query(TotalDay).all()
+            return jsonify([data.to_json() for data in all_data])
+    except Exception as e:
+        logger.error(f"Error in readAllDays: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route(BASE_URL + '/getCurrentDay', methods=['GET'])
 def get_current_day():
-    today = datetime.now(mexico_tz).date()
-    today_object = TotalDay.query.filter_by(date=today).first()
+    try:
+        today = datetime.now(mexico_tz).date()
+        
+        with get_session() as session:
+            today_object = session.query(TotalDay).filter_by(date=today).first()
 
+            if today_object is None:
+                return jsonify({'total': 0})
+            else:
+                return jsonify(today_object.to_json())
+    except Exception as e:
+        logger.error(f"Error in getCurrentDay: {e}")
+        return jsonify({'error': str(e)}), 500
 
-
-    if today_object is None:
-        return jsonify({'total': 0})
-    else:
-        return jsonify(today_object.to_json())
-
-# -----------------------------------------------------------------------
 @app.route(BASE_URL + '/read30days', methods=['GET'])
 def read30days():
+    try:
+        today = datetime.now(mexico_tz).date()
+        thirty_days_ago = today - timedelta(days=30)
+        
+        with get_session() as session:
+            all_data = session.query(TotalDay).filter(
+                TotalDay.date >= thirty_days_ago,
+                TotalDay.date <= today
+            ).all()
 
-    # Hacer un diccionario del 1 al 30 que tenga el total de cada día
-    today = datetime.now(mexico_tz).date()
-    thirty_days_ago = today - timedelta(days=30)
-    all_data = TotalDay.query.filter(TotalDay.date >= thirty_days_ago, TotalDay.date <= today).all()
+            day_totals = {(thirty_days_ago + timedelta(days=i)).strftime('%d'): 0 for i in range(31)}
 
-    # Crear un diccionario con los últimos 30 días, inicializando en 0
-    day_totals = { (thirty_days_ago + timedelta(days=i)).strftime('%d'): 0 for i in range(31) }
+            for day in all_data:
+                day_totals[day.date.strftime('%d')] = day.total
 
-    # Actualizar el diccionario con los valores reales
-    for day in all_data:
-        day_totals[day.date.strftime('%d')] = day.total
-
-    return jsonify(day_totals)
-# -----------------------------------------------------------------------
+            return jsonify(day_totals)
+    except Exception as e:
+        logger.error(f"Error in read30days: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route(BASE_URL + '/getWeek', methods=['GET'])
 def get_week():
-    today = datetime.now(mexico_tz).date()
-    week_start = today - timedelta(days=today.weekday())
-    week_end = week_start + timedelta(days=6)
+    try:
+        today = datetime.now(mexico_tz).date()
+        week_start = today - timedelta(days=today.weekday())
+        week_end = week_start + timedelta(days=6)
 
-    week_data = TotalDay.query.filter(TotalDay.date >= week_start, TotalDay.date <= week_end).all()
+        with get_session() as session:
+            week_data = session.query(TotalDay).filter(
+                TotalDay.date >= week_start,
+                TotalDay.date <= week_end
+            ).all()
 
-    week_totals = {day.date.strftime('%A, %Y-%m-%d'): (day.total ** 2/216 * 1000) for day in week_data}
-    total_week = sum(day.total for day in week_data)
+            week_totals = {day.date.strftime('%A, %Y-%m-%d'): (day.total ** 2 / 216 * 1000) for day in week_data}
+            total_week = sum(day.total for day in week_data)
 
-    return jsonify({'week_totals': week_totals, 'total_week': total_week})
-
-# -----------------------------------------------------------------------
+            return jsonify({'week_totals': week_totals, 'total_week': total_week})
+    except Exception as e:
+        logger.error(f"Error in getWeek: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route(BASE_URL + '/getDayByNumber/<number>', methods=['GET'])
 def get_day_by_number(number):
+    try:
+        with get_session() as session:
+            all_data = session.query(TotalDay).all()
 
-    today = datetime.now(mexico_tz).date()
-    all_data = TotalDay.query.all()
+            total = 0
+            for data in all_data:
+                if data.date.day == int(number):
+                    total += data.total
 
-    total = 0
-
-    for data in all_data:
-        if data.date.day == int(number):
-            total += data.total
-
-    return jsonify({'day': number, 'total': total})
-
-#- Fin de GET para TotalDay -----------------------------------------------
+            return jsonify({'day': number, 'total': total})
+    except Exception as e:
+        logger.error(f"Error in getDayByNumber: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # GETs | TotalMonth -----------------------------------------------------
 
 @app.route(BASE_URL + '/getCurrentMonth', methods=['GET'])
 def get_current_month():
-    today = datetime.now(mexico_tz).date()
-    month_start = today.replace(day=1)
-    month_object = TotalMonth.query.filter_by(date=month_start).first()
+    try:
+        today = datetime.now(mexico_tz).date()
+        month_start = today.replace(day=1)
+        
+        with get_session() as session:
+            month_object = session.query(TotalMonth).filter_by(date=month_start).first()
 
-    if month_object is None:
-        return jsonify({'total': 0})
-    else:
-        return jsonify(month_object.to_json())
-    
-# -----------------------------------------------------------------------
+            if month_object is None:
+                return jsonify({'total': 0})
+            else:
+                return jsonify(month_object.to_json())
+    except Exception as e:
+        logger.error(f"Error in getCurrentMonth: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route(BASE_URL + '/readAllMonths', methods=['GET'])
 def readAllMonths():
-    all_data = TotalMonth.query.all()
+    try:
+        with get_session() as session:
+            all_data = session.query(TotalMonth).all()
 
-    #Crear un diccionario de meses del 1 al 12 que tenga el total de cada mes
-    month_totals = {month: 0 for month in range(1, 13)}
+            month_totals = {month: 0 for month in range(1, 13)}
 
-    for data in all_data:
-        month = data.date.month
-        month_totals[month] += data.total
+            for data in all_data:
+                month = data.date.month
+                month_totals[month] += data.total
 
-    return jsonify(month_totals)
+            return jsonify(month_totals)
+    except Exception as e:
+        logger.error(f"Error in readAllMonths: {e}")
+        return jsonify({'error': str(e)}), 500
 
-# -----------------------------------------------------------------------
 @app.route(BASE_URL + '/getMonthsObjects', methods=['GET'])
 def get_months_objects():
-    all_data = TotalMonth.query.all()
-    return jsonify([data.to_json() for data in all_data])
-
-#- Fin de GET para TotalMonth --------------------------------------------
+    try:
+        with get_session() as session:
+            all_data = session.query(TotalMonth).all()
+            return jsonify([data.to_json() for data in all_data])
+    except Exception as e:
+        logger.error(f"Error in getMonthsObjects: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # GETs | TotalAll -------------------------------------------------------
+
 @app.route(BASE_URL + '/getTotal', methods=['GET'])
 def get_total():
-    total_object = TotalAll.query.first()
+    try:
+        with get_session() as session:
+            total_object = session.query(TotalAll).first()
 
-    if total_object is None:
-        return jsonify({'total': 0})
-    else:
-        return jsonify(total_object.to_json())
-
-# -----------------------------------------------------------------------
-
-
-
-
+            if total_object is None:
+                return jsonify({'total': 0})
+            else:
+                return jsonify(total_object.to_json())
+    except Exception as e:
+        logger.error(f"Error in getTotal: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # ---DELETE-------------------------------------------------------------
+
 @app.route(BASE_URL + '/resetAll', methods=['DELETE'])
 def resetAll():
-    db.session.query(WallData).delete()
-    db.session.query(TotalDay).delete()
-    db.session.query(TotalMonth).delete()
-    db.session.query(TotalAll).delete()
-    db.session.commit()
-    return jsonify({'message': 'All data has been deleted'})
-# -----------------------------------------------------------------------
+    try:
+        with get_session() as session:
+            session.query(WallData).delete()
+            session.query(TotalDay).delete()
+            session.query(TotalMonth).delete()
+            session.query(TotalAll).delete()
+            return jsonify({'message': 'All data has been deleted'})
+    except Exception as e:
+        logger.error(f"Error in resetAll: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route(BASE_URL + '/resetTempWallData', methods=['DELETE'])
 def resetTempWallData():
-    db.session.query(TempWallData).delete()
-    db.session.commit()
-    return jsonify({'message': 'All data has been deleted'})
-# -----------------------------------------------------------------------
+    try:
+        with get_session() as session:
+            session.query(TempWallData).delete()
+            return jsonify({'message': 'All temp data has been deleted'})
+    except Exception as e:
+        logger.error(f"Error in resetTempWallData: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route(BASE_URL + '/deleteAllZeros', methods=['DELETE'])
 def deleteAllZeros():
-    db.session.query(WallData).filter(WallData.propeller1 == 0, WallData.propeller2 == 0, WallData.propeller3 == 0, WallData.propeller4 == 0, WallData.propeller5 == 0).delete()
-    db.session.commit()
-    return jsonify({'message': 'All zeros have been deleted'})
+    try:
+        with get_session() as session:
+            session.query(WallData).filter(
+                WallData.propeller1 == 0,
+                WallData.propeller2 == 0,
+                WallData.propeller3 == 0,
+                WallData.propeller4 == 0,
+                WallData.propeller5 == 0
+            ).delete()
+            return jsonify({'message': 'All zeros have been deleted'})
+    except Exception as e:
+        logger.error(f"Error in deleteAllZeros: {e}")
+        return jsonify({'error': str(e)}), 500
 
+# -----------------------------------------------------------------------
+# CLEANUP
+# -----------------------------------------------------------------------
+
+@app.teardown_appcontext
+def shutdown_session(exception=None):
+    Session.remove()
+
+# -----------------------------------------------------------------------
+# MAIN
+# -----------------------------------------------------------------------
 
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-    print("Tables created")
+    # Crear todas las tablas
+    Base.metadata.create_all(engine)
+    logger.info("✓ Tablas creadas/verificadas")
+    
+    # Probar conexión
+    try:
+        with get_session() as session:
+            session.execute('SELECT 1')
+        logger.info("✓ Conexión a base de datos exitosa")
+    except Exception as e:
+        logger.error(f"✗ Error al conectar a la base de datos: {e}")
+    
     app.run(debug=False)
-
-# -----------------------------------------------------------------------
-# FIN DE | METODOS HTTP
-# -----------------------------------------------------------------------
-
