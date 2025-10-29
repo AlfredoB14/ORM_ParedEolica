@@ -16,7 +16,14 @@ from sqlalchemy import cast, Date, func
 
 app = Flask(__name__)
 CORS(app)
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('SQLALCHEMY_DATABASE_URI')
+# Load environment variables from .env (ensure this is done before reading them)
+load_dotenv()
+
+# Read the database URI and fail early with a clear message if it's missing
+db_uri = os.getenv('SQLALCHEMY_DATABASE_URI')
+if not db_uri:
+    raise RuntimeError("Environment variable SQLALCHEMY_DATABASE_URI is not set. Ensure you have a .env file with SQLALCHEMY_DATABASE_URI and that it's reachable from this process.")
+app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
  
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)  # Inicializar Flask-Migrate
